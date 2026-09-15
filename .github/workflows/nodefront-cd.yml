@@ -15,9 +15,128 @@ permissions:
   contents: read
 
 jobs:
+  app-env-client:
+    name: App env (client ← GitHub environment nodefront-dev)
+    runs-on: ubuntu-latest
+    environment: "nodefront-dev"
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      changed: ${{ steps.write.outputs.changed }}
+    steps:
+      - name: Configure AWS credentials (OIDC — no stored secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::167313940749:role/gha-arjun-132004-nodedeploy-nodedeploy-client
+          aws-region: us-east-1
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure cluster access (keyless)
+        run: aws eks update-kubeconfig --name "teams-dev" --region us-east-1
+
+      - name: Write GitHub environment values to Secret app-env-client
+        id: write
+        # Values reach the step only through env: — GitHub masks secrets in
+        # logs and expands them nowhere else. The DDA_V_ prefix keeps an app
+        # setting called PATH or HOME from breaking the shell below.
+        env:
+          DDA_V_DEEPAGENT_MANAGED_VARS: ${{ vars.DEEPAGENT_MANAGED_VARS }}
+          DDA_V_VITE_SERVER_URL: ${{ vars.VITE_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          kubectl get namespace "storefront-devnode" >/dev/null 2>&1 || kubectl create namespace "storefront-devnode"
+          # Fingerprint the Secret before and after. The deploy job restarts
+          # this service when an EXISTING Secret changed; one this job creates
+          # belongs to a first deploy, whose pods read it as they start.
+          fp() { local d; d=$(kubectl -n storefront-devnode get secret app-env-client -o jsonpath='{.data}' 2>/dev/null) || return 0; printf '%s' "$d" | sha256sum | cut -c1-16; }
+          BEFORE=$(fp)
+          ARGS=()
+          for NAME in DEEPAGENT_MANAGED_VARS VITE_SERVER_URL; do
+            SRC="DDA_V_$NAME"
+            VAL="${!SRC:-}"
+            # A value pasted with a Windows line ending reaches the pod as
+            # "x\r\n", and the app rejects its own valid setting.
+            VAL="${VAL//$'\r'/}"; VAL="${VAL%%$'\n'}"
+            if [ -n "$VAL" ]; then
+              ARGS+=("--from-literal=$NAME=$VAL")
+            else
+              echo "::warning::$NAME is not set in GitHub environment 'nodefront-dev' — the client pod will not see it."
+            fi
+          done
+          if [ ${#ARGS[@]} -gt 0 ]; then
+            DOC=$(kubectl -n storefront-devnode create secret generic app-env-client "${ARGS[@]}" --dry-run=client -o json)
+            if kubectl -n storefront-devnode get secret app-env-client >/dev/null 2>&1; then
+              kubectl -n storefront-devnode patch secret app-env-client --type merge -p "$DOC"
+            else
+              printf '%s' "$DOC" | kubectl -n storefront-devnode create -f -
+            fi
+          fi
+          if [ -n "$BEFORE" ] && [ "$(fp)" != "$BEFORE" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
+
+  app-env-server:
+    name: App env (server ← GitHub environment nodefront-dev)
+    runs-on: ubuntu-latest
+    environment: "nodefront-dev"
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      changed: ${{ steps.write.outputs.changed }}
+    steps:
+      - name: Configure AWS credentials (OIDC — no stored secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::167313940749:role/gha-arjun-132004-nodedeploy-nodedeploy-client
+          aws-region: us-east-1
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure cluster access (keyless)
+        run: aws eks update-kubeconfig --name "teams-dev" --region us-east-1
+
+      - name: Write GitHub environment values to Secret app-env-server
+        id: write
+        # Values reach the step only through env: — GitHub masks secrets in
+        # logs and expands them nowhere else. The DDA_V_ prefix keeps an app
+        # setting called PATH or HOME from breaking the shell below.
+        env:
+          DDA_V_DEEPAGENT_MANAGED_VARS: ${{ vars.DEEPAGENT_MANAGED_VARS }}
+          DDA_V_VITE_SERVER_URL: ${{ vars.VITE_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          kubectl get namespace "storefront-devnode" >/dev/null 2>&1 || kubectl create namespace "storefront-devnode"
+          # Fingerprint the Secret before and after. The deploy job restarts
+          # this service when an EXISTING Secret changed; one this job creates
+          # belongs to a first deploy, whose pods read it as they start.
+          fp() { local d; d=$(kubectl -n storefront-devnode get secret app-env-server -o jsonpath='{.data}' 2>/dev/null) || return 0; printf '%s' "$d" | sha256sum | cut -c1-16; }
+          BEFORE=$(fp)
+          ARGS=()
+          for NAME in DEEPAGENT_MANAGED_VARS VITE_SERVER_URL; do
+            SRC="DDA_V_$NAME"
+            VAL="${!SRC:-}"
+            # A value pasted with a Windows line ending reaches the pod as
+            # "x\r\n", and the app rejects its own valid setting.
+            VAL="${VAL//$'\r'/}"; VAL="${VAL%%$'\n'}"
+            if [ -n "$VAL" ]; then
+              ARGS+=("--from-literal=$NAME=$VAL")
+            else
+              echo "::warning::$NAME is not set in GitHub environment 'nodefront-dev' — the server pod will not see it."
+            fi
+          done
+          if [ ${#ARGS[@]} -gt 0 ]; then
+            DOC=$(kubectl -n storefront-devnode create secret generic app-env-server "${ARGS[@]}" --dry-run=client -o json)
+            if kubectl -n storefront-devnode get secret app-env-server >/dev/null 2>&1; then
+              kubectl -n storefront-devnode patch secret app-env-server --type merge -p "$DOC"
+            else
+              printf '%s' "$DOC" | kubectl -n storefront-devnode create -f -
+            fi
+          fi
+          if [ -n "$BEFORE" ] && [ "$(fp)" != "$BEFORE" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
+
   deploy:
     name: Deploy all services
     runs-on: ubuntu-latest
+    needs: [app-env-client, app-env-server]
 
     # dda:release-gate
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
@@ -144,14 +263,14 @@ jobs:
             kubectl apply -n storefront-devnode "$@"
           fi
 
-      - name: Restart server rollout (manual dispatch — image tag unchanged)
+      - name: Restart server rollout (manual dispatch, or its configuration changed)
         id: restart_server
         # On workflow_run the pinned apply above already changed the image, which
         # starts the rollout by itself; restarting as well would add a second,
         # identical revision to the history for every deploy. Only a manual
         # dispatch re-applies the same `:latest` tag and needs a forced restart
         # to pull whatever that tag now points at.
-        if: ${{ github.event_name != 'workflow_run' }}
+        if: ${{ github.event_name != 'workflow_run' || needs['app-env-server'].outputs.changed == 'true' }}
         run: kubectl rollout restart deployment/nodedeploy-server -n storefront-devnode
 
       - name: Wait for server rollout
@@ -292,14 +411,14 @@ jobs:
             kubectl apply -n storefront-devnode "$@"
           fi
 
-      - name: Restart client rollout (manual dispatch — image tag unchanged)
+      - name: Restart client rollout (manual dispatch, or its configuration changed)
         id: restart_client
         # On workflow_run the pinned apply above already changed the image, which
         # starts the rollout by itself; restarting as well would add a second,
         # identical revision to the history for every deploy. Only a manual
         # dispatch re-applies the same `:latest` tag and needs a forced restart
         # to pull whatever that tag now points at.
-        if: ${{ github.event_name != 'workflow_run' }}
+        if: ${{ github.event_name != 'workflow_run' || needs['app-env-client'].outputs.changed == 'true' }}
         run: kubectl rollout restart deployment/nodedeploy-client -n storefront-devnode
 
       - name: Wait for client rollout

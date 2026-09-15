@@ -6,6 +6,13 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm pkg delete scripts.prepare >/dev/null 2>&1 || true && if [ -f package-lock.json ]; then npm ci || npm ci --legacy-peer-deps; else npm install; fi
 COPY . .
+# Build-time env for the frontend build (added by DeepAgent).
+# These are framework-prefixed, i.e. inlined into the public bundle by
+# design — never put a credential in a build arg. The empty defaults keep
+# the image buildable with no --build-arg; CI overrides them with the
+# real values.
+ARG VITE_SERVER_URL=""
+ENV VITE_SERVER_URL=${VITE_SERVER_URL}
 RUN npm run build
 
 # --- Runtime: unprivileged nginx (already non-root uid 101, listens on 8080) ---
